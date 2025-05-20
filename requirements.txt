@@ -1,1 +1,9 @@
-streamlit
+streamlit==1.38.0 p
+dfplumber==0.11.4
+requests==2.32.3
+beautifulsoup4==4.12.3
+pytesseract==0.3.13
+Pillow==10.4.0
+python-dotenv==1.0.1
+langgraph==0.2.5
+langchain-openai==0.1.22
