@@ -3,7 +3,7 @@ import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageEnhance
 import io
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, Optional, List, Dict
@@ -24,26 +24,22 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 logger.info("Environment variables loaded from .env file")
 
-# Set page configuration
-st.set_page_config(
-    page_title="Marriage Bio Analyser Buddy",
-    page_icon="🕊️",
-    layout="wide"
-)
-
 # Define directories for storing inputs
 PDF_DIR = "pdfs"
 URL_DIR = "urls"
 IMAGE_DIR = "images"
+TEXT_DIR = "texts"
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(URL_DIR, exist_ok=True)
 os.makedirs(IMAGE_DIR, exist_ok=True)
+os.makedirs(TEXT_DIR, exist_ok=True)
 
 # Define the state for LangGraph
 class BiodataState(TypedDict):
     pdf_texts: List[Dict[str, Optional[str]]]
     web_texts: List[Dict[str, Optional[str]]]
     image_texts: List[Dict[str, Optional[str]]]
+    text_inputs: List[Dict[str, Optional[str]]]
     user_query: str
     llm_response: Optional[str]
     api_key: Optional[str]
@@ -136,6 +132,21 @@ def save_image(image_file, index: int) -> Dict[str, Optional[str]]:
         st.error(f"Error saving image {index}: {e}")
         return {"path": None, "original_name": original_name}
 
+# Function to save text input and return metadata
+def save_text(text_input: str, index: int) -> Dict[str, Optional[str]]:
+    try:
+        original_name = f"text_input_{index}"
+        filename = sanitize_filename(f"text_{index}_{original_name}.txt")
+        path = os.path.join(TEXT_DIR, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text_input)
+        logger.info(f"Text input {index} saved to {path} (overwritten if existed)")
+        return {"path": path, "original_name": original_name, "text": text_input}
+    except Exception as e:
+        logger.error(f"Error saving text input {index}: {e}")
+        st.error(f"Error saving text input {index}: {e}")
+        return {"path": None, "original_name": original_name, "text": None}
+
 # Function to extract text from PDF
 def extract_pdf_text(pdf_file, metadata: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
     try:
@@ -184,6 +195,12 @@ def extract_image_text(image_file, metadata: Dict[str, Optional[str]]) -> Dict[s
     try:
         logger.info(f"Extracting text from image: {metadata['path']}")
         image = Image.open(image_file)
+        # Preprocess image for better OCR
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+        image = image.convert('L')  # Convert to grayscale
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(2.0)  # Increase contrast
         text = pytesseract.image_to_string(image, lang='eng+hin+mar')
         logger.info(f"Image text extracted successfully from {metadata['path']}")
         metadata["text"] = text if text.strip() else None
@@ -200,6 +217,7 @@ def process_inputs(state: BiodataState) -> BiodataState:
     pdf_texts = state.get("pdf_texts", [])
     web_texts = state.get("web_texts", [])
     image_texts = state.get("image_texts", [])
+    text_inputs = state.get("text_inputs", [])
     user_query = state.get("user_query", "")
 
     # Combine all available texts with labels
@@ -217,13 +235,17 @@ def process_inputs(state: BiodataState) -> BiodataState:
         if img["text"]:
             combined_text += f"🖼️ Biodata {biodata_count} (Image - {img['original_name']}):\n{img['text']}\n\n"
             biodata_count += 1
+    for i, txt in enumerate(text_inputs, 1):
+        if txt["text"]:
+            combined_text += f"📝 Biodata {biodata_count} (Text - {txt['original_name']}):\n{txt['text']}\n\n"
+            biodata_count += 1
 
     if not combined_text.strip():
         combined_text = "No content extracted from provided inputs."
 
     # Prepare prompt for LLM
     prompt_template = ChatPromptTemplate.from_template(
-        """You are Marriage Bio Analyser Buddy, a friendly and insightful assistant for analyzing marriage biodata. Your task is to process biodata from PDFs, URLs, and images (in English, Hindi, or Marathi) and respond to the user's query. Provide clear, concise, and culturally sensitive answers based on the provided data.
+        """You are Marriage Bio Analyser Buddy, a friendly and insightful assistant for analyzing marriage biodata. Your task is to process biodata from PDFs, URLs, images, and text inputs (in English, Hindi, or Marathi) and respond to the user's query. Provide clear, concise, and culturally sensitive answers based on the provided data.
 
 **Instructions**:
 1. Analyze the biodata to extract relevant details (e.g., name, age, education, occupation, family details).
@@ -292,7 +314,7 @@ def main():
 
     st.title("💕⃝🕊️ Marriage Bio Analyser Buddy")
     st.write(
-        "📤 Upload multiple PDFs, provide website URLs, or upload images to analyze and compare marriage biodatas, then enter your query.")
+        "📤 Upload multiple PDFs, provide website URLs, upload images, or enter text to analyze and compare marriage biodatas, then enter your query.")
 
     # Admin settings for Gemini configuration
     with st.sidebar:
@@ -344,6 +366,8 @@ def main():
     urls = st.text_area("🌐 Enter Website URLs (one per line, optional)",
                         placeholder="https://example.com\nhttps://another.com")
     image_files = st.file_uploader("🖼️ Upload Image Biodatas", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+    text_inputs = st.text_area("📝 Enter Text Biodatas (one per line, optional)",
+                               placeholder="Name: John, Age: 30\nName: Jane, Age: 28")
     user_query = st.text_area("❓ Enter Your Query",
                               placeholder="e.g., Analyse the candidate profile. Or let's compare the profile details of all candidates.")
 
@@ -363,6 +387,7 @@ def main():
                 pdf_texts=[],
                 web_texts=[],
                 image_texts=[],
+                text_inputs=[],
                 user_query=user_query,
                 llm_response=None,
                 api_key=api_key,
@@ -394,8 +419,15 @@ def main():
                         metadata = extract_image_text(image_file, metadata)
                     state["image_texts"].append(metadata)
 
-            if not any([state["pdf_texts"], state["web_texts"], state["image_texts"]]):
-                st.error("No valid input provided. Please upload PDFs, provide URLs, or upload images 📤")
+            # Process and save text inputs
+            if text_inputs:
+                text_list = [text.strip() for text in text_inputs.split("\n") if text.strip()]
+                for i, text in enumerate(text_list, 1):
+                    metadata = save_text(text, i)
+                    state["text_inputs"].append(metadata)
+
+            if not any([state["pdf_texts"], state["web_texts"], state["image_texts"], state["text_inputs"]]):
+                st.error("No valid input provided. Please upload PDFs, provide URLs, upload images, or enter text 📤")
                 logger.warning("No valid inputs provided for analysis")
                 return
 
