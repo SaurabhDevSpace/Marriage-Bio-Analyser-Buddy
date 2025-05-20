@@ -64,16 +64,16 @@ def load_credentials():
         if not os.path.exists(credentials_file):
             logger.info("credentials.json file not found. Creating with default values.")
             default_credentials = {
-                "gemini_api_key": os.getenv("GOOGLE_API_KEY", ""),
+                "google_api_key": os.getenv("GOOGLE_API_KEY", ""),
                 "llm_model": "gemini-2.0-flash"
             }
             with open(credentials_file, 'w') as f:
                 json.dump(default_credentials, f, indent=2)
-            return default_credentials["gemini_api_key"], default_credentials["llm_model"]
+            return default_credentials["google_api_key"], default_credentials["llm_model"]
 
         with open(credentials_file, 'r') as f:
             credentials = json.load(f)
-            api_key = credentials.get("gemini_api_key", os.getenv("GOOGLE_API_KEY", ""))
+            api_key = credentials.get("google_api_key", os.getenv("GOOGLE_API_KEY", ""))
             llm_model = credentials.get("llm_model", "gemini-2.0-flash")
             if not api_key:
                 logger.warning("Gemini API key not found in credentials.json or environment variable")
@@ -354,7 +354,7 @@ def main():
                         if os.path.exists(credentials_file):
                             with open(credentials_file, 'r') as f:
                                 credentials = json.load(f)
-                        credentials["gemini_api_key"] = new_api_key
+                        credentials["google_api_key"] = new_api_key
                         credentials["llm_model"] = new_model
                         with open(credentials_file, 'w') as f:
                             json.dump(credentials, f, indent=2)
