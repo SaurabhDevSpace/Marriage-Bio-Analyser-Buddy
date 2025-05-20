@@ -26,8 +26,8 @@ logger.info("Environment variables loaded from .env file")
 
 # Set page configuration
 st.set_page_config(
-    page_title="💕🕊️ Marriage Bio Analyser Buddy",
-    page_icon="💕🕊️",
+    page_title="Marriage Bio Analyser Buddy",
+    page_icon="🕊️",
     layout="wide"
 )
 
