@@ -10,20 +10,19 @@ from typing import TypedDict, Optional, List, Dict
 import os
 from dotenv import load_dotenv
 import logging
-from langchain_openai import AzureChatOpenAI
+import json
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema import HumanMessage
 import re
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 logger.info("Environment variables loaded from .env file")
-deployment_name = os.getenv("deployment_name")
-api_version = os.getenv("api_version")
-openai_api_base = os.getenv("openai_api_base")
-openai_api_key = os.getenv("openai_api_key")
 
 # Define directories for storing inputs
 PDF_DIR = "pdfs"
@@ -33,7 +32,6 @@ os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(URL_DIR, exist_ok=True)
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-
 # Define the state for LangGraph
 class BiodataState(TypedDict):
     pdf_texts: List[Dict[str, Optional[str]]]
@@ -41,12 +39,49 @@ class BiodataState(TypedDict):
     image_texts: List[Dict[str, Optional[str]]]
     user_query: str
     llm_response: Optional[str]
-
+    api_key: Optional[str]
+    llm_model: Optional[str]
 
 # Function to sanitize filenames
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[^\w\-\.]', '_', name)
 
+# Function to load Gemini credentials
+def load_credentials():
+    """Load Gemini API key and model from credentials.json with environment variable fallback"""
+    try:
+        credentials_file = "credentials.json"
+        if not os.path.exists(credentials_file):
+            logger.info("credentials.json file not found. Creating with default values.")
+            default_credentials = {
+                "gemini_api_key": os.getenv("GOOGLE_API_KEY", ""),
+                "llm_model": "gemini-2.0-flash"
+            }
+            with open(credentials_file, 'w') as f:
+                json.dump(default_credentials, f, indent=2)
+            return default_credentials["gemini_api_key"], default_credentials["llm_model"]
+
+        with open(credentials_file, 'r') as f:
+            credentials = json.load(f)
+            api_key = credentials.get("gemini_api_key", os.getenv("GOOGLE_API_KEY", ""))
+            llm_model = credentials.get("llm_model", "gemini-2.0-flash")
+            if not api_key:
+                logger.warning("Gemini API key not found in credentials.json or environment variable")
+            return api_key, llm_model
+    except Exception as e:
+        logger.error(f"Error loading credentials: {e}")
+        return "", "gemini-2.0-flash"
+
+# Function to initialize configuration
+def initialize_config():
+    """Initialize API key and LLM model, storing in session state"""
+    if not hasattr(st.session_state, 'config_initialized') or not st.session_state.config_initialized:
+        api_key, llm_model = load_credentials()
+        st.session_state.api_key = api_key
+        st.session_state.llm_model = llm_model
+        st.session_state.config_initialized = True
+        logger.info(f"Configuration initialized: API key={'set' if api_key else 'not set'}, model={llm_model}")
+    return st.session_state.api_key, st.session_state.llm_model
 
 # Function to save PDF and return metadata
 def save_pdf(pdf_file, index: int) -> Dict[str, Optional[str]]:
@@ -63,28 +98,21 @@ def save_pdf(pdf_file, index: int) -> Dict[str, Optional[str]]:
         st.error(f"Error saving PDF {index}: {e}")
         return {"path": None, "original_name": original_name}
 
-
 # Function to save URL and scraped content, return metadata
 def save_url(url: str, index: int) -> Dict[str, Optional[str]]:
     try:
-        # Sanitize URL for filename
         filename = sanitize_filename(f"url_{index}_{url.replace('https://', '').replace('http://', '')}")
         url_path = os.path.join(URL_DIR, f"{filename}.txt")
         content_path = os.path.join(URL_DIR, f"{filename}_content.txt")
-
-        # Save URL
         with open(url_path, "w", encoding="utf-8") as f:
             f.write(url)
         logger.info(f"URL {index} saved to {url_path} (overwritten if existed)")
-
-        # Save scraped content (will be updated after scraping)
         metadata = {"path": url_path, "original_name": url, "content_path": content_path}
         return metadata
     except Exception as e:
         logger.error(f"Error saving URL {index}: {e}")
         st.error(f"Error saving URL {index}: {e}")
         return {"path": None, "original_name": url, "content_path": None}
-
 
 # Function to save image and return metadata
 def save_image(image_file, index: int) -> Dict[str, Optional[str]]:
@@ -100,7 +128,6 @@ def save_image(image_file, index: int) -> Dict[str, Optional[str]]:
         logger.error(f"Error saving image {index}: {e}")
         st.error(f"Error saving image {index}: {e}")
         return {"path": None, "original_name": original_name}
-
 
 # Function to extract text from PDF
 def extract_pdf_text(pdf_file, metadata: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
@@ -119,7 +146,6 @@ def extract_pdf_text(pdf_file, metadata: Dict[str, Optional[str]]) -> Dict[str, 
         metadata["text"] = None
         return metadata
 
-
 # Function to scrape text from a website and save content
 def scrape_website(url: str, metadata: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
     try:
@@ -131,7 +157,6 @@ def scrape_website(url: str, metadata: Dict[str, Optional[str]]) -> Dict[str, Op
             script.decompose()
         text = soup.get_text(separator=" ", strip=True)
         if text.strip():
-            # Save scraped content
             if metadata["content_path"]:
                 with open(metadata["content_path"], "w", encoding="utf-8") as f:
                     f.write(text)
@@ -147,7 +172,6 @@ def scrape_website(url: str, metadata: Dict[str, Optional[str]]) -> Dict[str, Op
         metadata["text"] = None
         return metadata
 
-
 # Function to perform OCR on images
 def extract_image_text(image_file, metadata: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
     try:
@@ -162,27 +186,6 @@ def extract_image_text(image_file, metadata: Dict[str, Optional[str]]) -> Dict[s
         st.error(f"Error extracting image text from {metadata['original_name']}: {e}")
         metadata["text"] = None
         return metadata
-
-
-# Function to setup Azure OpenAI LLM
-def setup_llm():
-    """Initialize and setup the LLM model."""
-    logger.info("Setting up LLM with Azure OpenAI")
-    try:
-        llm = AzureChatOpenAI(
-            azure_deployment=deployment_name,
-            azure_endpoint=openai_api_base,
-            api_key=openai_api_key,
-            openai_api_version=api_version,
-            temperature=1
-        )
-        logger.info("LLM setup successful")
-        return llm
-    except Exception as e:
-        logger.error(f"Error setting up LLM: {str(e)}")
-        st.error(f"Error setting up LLM: {str(e)}")
-        return None
-
 
 # Function to process inputs
 def process_inputs(state: BiodataState) -> BiodataState:
@@ -212,39 +215,58 @@ def process_inputs(state: BiodataState) -> BiodataState:
         combined_text = "No content extracted from provided inputs."
 
     # Prepare prompt for LLM
-    prompt = f"""Analyze the following marriage biodata information and respond to the user's query. Each biodata is labeled for clarity.
+    prompt_template = ChatPromptTemplate.from_template(
+        """You are Marriage Bio Analyser Buddy, a friendly and insightful assistant for analyzing marriage biodata. Your task is to process biodata from PDFs, URLs, and images (in English, Hindi, or Marathi) and respond to the user's query. Provide clear, concise, and culturally sensitive answers based on the provided data.
 
-Biodata Information:
-{combined_text}
+**Instructions**:
+1. Analyze the biodata to extract relevant details (e.g., name, age, education, occupation, family details).
+2. Answer the user's query directly, using bullet points or headings for clarity.
+3. If the query involves comparison (e.g., multiple biodatas), highlight key differences and similarities.
+4. If data is missing or unclear, note it and provide a partial answer or suggest clarification.
+5. Keep the tone friendly, professional, and respectful.
 
-User Query:
+**User Query**:
 {user_query}
 
-Provide a concise and relevant response based on the biodata and query. If the query involves comparison, compare the biodatas accordingly.
+**Biodata Content**:
+{biodata_text}
+
+**Output**:
+Provide a clear, structured response in markdown format (use headings, bullet points, or tables as needed).
 """
+    )
+    prompt = prompt_template.format(
+        user_query=user_query,
+        biodata_text=combined_text
+    )
     state["llm_response"] = prompt
     logger.info("Inputs processed and prompt prepared")
     return state
 
-
 # Function to query the LLM
 def query_llm(state: BiodataState) -> BiodataState:
     try:
-        logger.info("Querying LLM")
-        llm = setup_llm()
-        if llm is None:
-            state["llm_response"] = "Failed to initialize LLM."
-            logger.error("LLM initialization failed")
+        logger.info("Querying Google Gemini LLM")
+        api_key = state.get("api_key")
+        llm_model = state.get("llm_model")
+        if not api_key or not llm_model:
+            logger.error("API key or LLM model missing in state")
+            state["llm_response"] = "Error: API key or LLM model not configured. Please set them in Admin Settings."
             return state
-        response = llm.invoke(state["llm_response"]).content
-        state["llm_response"] = response
+        llm = ChatGoogleGenerativeAI(
+            model=llm_model,
+            google_api_key=api_key,
+            temperature=0.25
+        )
+        message = HumanMessage(content=state["llm_response"])
+        response = llm.invoke([message])
+        state["llm_response"] = response.content
         logger.info("LLM query successful")
         return state
     except Exception as e:
         logger.error(f"Error querying LLM: {e}")
         state["llm_response"] = f"Error querying LLM: {e}"
         return state
-
 
 # Define the LangGraph workflow
 def create_workflow():
@@ -256,12 +278,58 @@ def create_workflow():
     workflow.add_edge("query_llm", END)
     return workflow.compile()
 
-
 # Streamlit app
 def main():
+    # Initialize configuration
+    api_key, llm_model = initialize_config()
+
     st.title("💕⃝🕊️ Marriage Bio Analyser Buddy")
     st.write(
         "📤 Upload multiple PDFs, provide website URLs, or upload images to analyze and compare marriage biodatas, then enter your query.")
+
+    # Admin settings for Gemini configuration
+    with st.sidebar:
+        st.header("Admin Settings")
+        if 'is_admin' not in st.session_state:
+            st.session_state.is_admin = False
+        if not st.session_state.is_admin:
+            admin_password = st.text_input("Admin Password", type="password")
+            if st.button("Login"):
+                if admin_password == "SuperAdmin123!":  # Replace with secure password
+                    st.session_state.is_admin = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password")
+        else:
+            st.success("Logged in as Admin")
+            if st.button("Logout"):
+                st.session_state.is_admin = False
+                st.rerun()
+            with st.expander("Configure Gemini API"):
+                current_api_key = getattr(st.session_state, 'api_key', '')
+                current_model = getattr(st.session_state, 'llm_model', 'gemini-2.0-flash')
+                available_models = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"]
+                new_api_key = st.text_input("Gemini API Key", value=current_api_key, type="password")
+                new_model = st.selectbox("Select LLM Model", options=available_models, index=available_models.index(current_model) if current_model in available_models else 0)
+                if st.button("Save Gemini Configuration"):
+                    try:
+                        credentials_file = "credentials.json"
+                        credentials = {}
+                        if os.path.exists(credentials_file):
+                            with open(credentials_file, 'r') as f:
+                                credentials = json.load(f)
+                        credentials["gemini_api_key"] = new_api_key
+                        credentials["llm_model"] = new_model
+                        with open(credentials_file, 'w') as f:
+                            json.dump(credentials, f, indent=2)
+                        st.session_state.api_key = new_api_key
+                        st.session_state.llm_model = new_model
+                        st.session_state.config_initialized = False  # Force reinitialization
+                        st.success("Gemini configuration updated!")
+                        st.rerun()
+                    except Exception as e:
+                        logger.error(f"Error saving Gemini configuration: {e}")
+                        st.error(f"Failed to save configuration: {e}")
 
     # Input fields
     st.subheader("📂 Upload Biodata")
@@ -277,15 +345,21 @@ def main():
             st.error("Please provide a query ❓")
             logger.warning("Analysis attempted without a query")
             return
+        if not api_key:
+            st.error("Gemini API key not configured. Please set it in Admin Settings.")
+            logger.warning("Analysis attempted without API key")
+            return
 
         with st.spinner("Analyzing..."):
-            # Initialize state
+            # Initialize state with API key and model
             state = BiodataState(
                 pdf_texts=[],
                 web_texts=[],
                 image_texts=[],
                 user_query=user_query,
-                llm_response=None
+                llm_response=None,
+                api_key=api_key,
+                llm_model=llm_model
             )
 
             # Process and save PDFs
@@ -326,12 +400,11 @@ def main():
             # Display result
             st.subheader("📊 Analysis Result")
             if result["llm_response"]:
-                st.write(result["llm_response"])
+                st.markdown(result["llm_response"])
                 logger.info("Analysis result displayed")
             else:
                 st.error("No response from LLM 🚫")
                 logger.error("No LLM response received")
-
 
 if __name__ == "__main__":
     main()
