@@ -375,10 +375,47 @@ def main():
     image_files = st.file_uploader("🖼️ Upload Image Biodatas", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
     text_inputs = st.text_area("📝 Enter Text Biodatas (one per line, optional)",
                                placeholder="Name: John, Age: 30\nName: Jane, Age: 28")
-    user_query = st.text_area("❓ Enter Your Query",
-                              placeholder="e.g., Analyse the candidate profile. Or let's compare the profile details of all candidates.")
+
+
+
+
+    # Question templates
+    question_templates = {
+        "🔀 Comparisons": [
+            "Compare every minor detail in these two biodatas (A and B): list each field with exact values or 'Not mentioned', then give a point-by-point mutual comparison and note any conflicts. Be factual and don’t infer.",
+            "Compare biodata A and B:\n1) Extract key fields (Personal, Education, Profession, Family, Lifestyle, Community, Preferences).\n2) Show a side-by-side table with values or 'Not mentioned'.\n3) Give similarities, differences, and any conflicts. Be neutral and factual.",
+            "Do a complete field-by-field comparison of biodata A vs B (use 'Not mentioned' if absent); list similarities, differences and conflicts — no assumptions.",
+            "You are comparing two marriage biodatas (A and B). Give a complete, practical comparison that is useful for families to decide next steps.\n- Extract details field by field.\n- Make side-by-side table.\n- Show similarities, differences, conflicts.\n- Add short insights (lifestyle, family, career, preferences).\n- End with missing details/questions to clarify."
+        ],
+        "👤 Single Biodata": [
+            "Extract all details from this single biodata in structured format: Personal, Education, Profession, Family, Lifestyle, Community (if written), Partner Preferences, Other Notes. Mark missing as 'Not mentioned'. End with 5–7 follow-up questions to clarify unclear or missing details."
+        ]
+    }
+
+    # Use session state to persist user_query
+    if 'user_query' not in st.session_state:
+        st.session_state.user_query = ""
+
+    st.write("\n")
+    user_query = st.text_area(
+        "❓ Enter Your Query",
+        value=st.session_state.user_query,
+        placeholder="e.g., Analyse the candidate profile. Or let's compare the profile details of all candidates."
+    )
+    st.session_state.user_query = user_query
+
+    # Show question templates as clickable buttons
+    st.markdown("**Or select a question template:**")
+    for section, templates in question_templates.items():
+        st.markdown(f"**{section}**")
+        cols = st.columns(len(templates))
+        for i, template in enumerate(templates):
+            if cols[i].button(f"Template {i+1}", key=f"{section}_{i}"):
+                st.session_state.user_query = template
+                st.rerun()
 
     if st.button("🚀 Analyze"):
+        user_query = st.session_state.user_query
         if not user_query:
             st.error("Please provide a query ❓")
             logger.warning("Analysis attempted without a query")
